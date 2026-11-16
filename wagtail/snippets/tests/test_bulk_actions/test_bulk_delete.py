@@ -417,6 +417,17 @@ class TestSnippetDeleteAllInListing(WagtailTestUtils, TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertRemaining(FullFeaturedSnippet, ["Apple"])
 
+    def test_covers_every_page_of_the_listing(self):
+        # The page number and ordering are passed along too, and must not
+        # narrow the selection to the page being viewed
+        for text in ("Apple", "Apple pie", "Banana"):
+            FullFeaturedSnippet.objects.create(text=text)
+        response = self.delete_all(
+            FullFeaturedSnippet, q="Apple", p="2", ordering="text"
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertRemaining(FullFeaturedSnippet, ["Banana"])
+
     def test_search_without_matches_deletes_nothing(self):
         FullFeaturedSnippet.objects.create(text="Apple")
         response = self.delete_all(FullFeaturedSnippet, q="Zucchini")
