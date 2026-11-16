@@ -1,13 +1,15 @@
 from django.contrib.admin.utils import quote
 from django.contrib.auth.models import Permission
 from django.http import HttpRequest, HttpResponse
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils.http import urlencode
 
+from wagtail.models import Locale
 from wagtail.snippets.bulk_actions.delete import DeleteBulkAction
 from wagtail.test.testapp.models import (
     Advert,
+    DraftStateModel,
     FullFeaturedSnippet,
     VariousOnDeleteModel,
 )
@@ -348,3 +350,88 @@ class TestProtectedBulkDeleteView(WagtailTestUtils, TestCase):
 
         # Check that the snippet is still here
         self.assertTrue(Advert.objects.filter(pk=protected.pk).exists())
+
+
+class TestSnippetDeleteAllInListing(WagtailTestUtils, TestCase):
+    """
+    "Select all in listing" sends ``id=all`` along with the listing's own query
+    parameters, and must act on the same objects that the listing shows.
+    """
+
+    def setUp(self):
+        self.login()
+
+    def delete_all(self, model, **params):
+        url = reverse(
+            "wagtail_bulk_action",
+            args=(model._meta.app_label, model._meta.model_name, "delete"),
+        )
+        return self.client.post(url + "?" + urlencode({**params, "id": "all"}))
+
+    def assertRemaining(self, model, expected):
+        self.assertCountEqual(model.objects.values_list("text", flat=True), expected)
+
+    def test_without_parameters_deletes_everything(self):
+        for text in ("Apple", "Banana"):
+            FullFeaturedSnippet.objects.create(text=text)
+        response = self.delete_all(FullFeaturedSnippet)
+        self.assertEqual(response.status_code, 302)
+        self.assertRemaining(FullFeaturedSnippet, [])
+
+    def test_respects_search_with_search_backend(self):
+        for text in ("Apple", "Banana"):
+            FullFeaturedSnippet.objects.create(text=text)
+        response = self.delete_all(FullFeaturedSnippet, q="Apple")
+        self.assertEqual(response.status_code, 302)
+        self.assertRemaining(FullFeaturedSnippet, ["Banana"])
+
+    def test_respects_search_with_orm_search(self):
+        # DraftStateModelViewSet sets search_backend_name = None
+        for text in ("Apple", "Banana"):
+            DraftStateModel.objects.create(text=text)
+        response = self.delete_all(DraftStateModel, q="Apple")
+        self.assertEqual(response.status_code, 302)
+        self.assertRemaining(DraftStateModel, ["Banana"])
+
+    def test_respects_filters(self):
+        FullFeaturedSnippet.objects.create(text="Apple", country_code="ID")
+        FullFeaturedSnippet.objects.create(text="Banana", country_code="UK")
+        response = self.delete_all(FullFeaturedSnippet, country_code="ID")
+        self.assertEqual(response.status_code, 302)
+        self.assertRemaining(FullFeaturedSnippet, ["Banana"])
+
+    def test_respects_search_and_filters_together(self):
+        FullFeaturedSnippet.objects.create(text="Apple", country_code="ID")
+        FullFeaturedSnippet.objects.create(text="Apple pie", country_code="UK")
+        FullFeaturedSnippet.objects.create(text="Banana", country_code="ID")
+        response = self.delete_all(FullFeaturedSnippet, q="Apple", country_code="ID")
+        self.assertEqual(response.status_code, 302)
+        self.assertRemaining(FullFeaturedSnippet, ["Apple pie", "Banana"])
+
+    @override_settings(WAGTAIL_I18N_ENABLED=True)
+    def test_respects_locale(self):
+        french = Locale.objects.create(language_code="fr")
+        FullFeaturedSnippet.objects.create(text="Apple")
+        FullFeaturedSnippet.objects.create(text="Pomme", locale=french)
+        response = self.delete_all(FullFeaturedSnippet, locale="fr")
+        self.assertEqual(response.status_code, 302)
+        self.assertRemaining(FullFeaturedSnippet, ["Apple"])
+
+    def test_search_without_matches_deletes_nothing(self):
+        FullFeaturedSnippet.objects.create(text="Apple")
+        response = self.delete_all(FullFeaturedSnippet, q="Zucchini")
+        self.assertEqual(response.status_code, 404)
+        self.assertRemaining(FullFeaturedSnippet, ["Apple"])
+
+    def test_confirmation_lists_only_the_objects_in_listing(self):
+        for text in ("Apple", "Banana"):
+            FullFeaturedSnippet.objects.create(text=text)
+        url = reverse(
+            "wagtail_bulk_action",
+            args=("tests", "fullfeaturedsnippet", "delete"),
+        )
+        response = self.client.get(url, {"q": "Apple", "id": "all"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [item["item"].text for item in response.context["items"]], ["Apple"]
+        )
